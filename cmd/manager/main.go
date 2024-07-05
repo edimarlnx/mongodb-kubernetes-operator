@@ -2,7 +2,10 @@ package main
 
 import (
 	"fmt"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/rest"
 	"os"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 
 	mdbv1 "github.com/mongodb/mongodb-kubernetes-operator/api/v1"
 	"github.com/mongodb/mongodb-kubernetes-operator/controllers"
@@ -22,6 +25,7 @@ var (
 
 const (
 	WatchNamespaceEnv = "WATCH_NAMESPACE"
+	LabelSelectorEnv  = "LABEL_SELECTOR"
 )
 
 func init() {
@@ -67,8 +71,27 @@ func main() {
 
 	// If namespace is a wildcard use the empty string to represent all namespaces
 	watchNamespace := ""
+	var newCacheFunc func(cfg *rest.Config, opts cache.Options) (cache.Cache, error)
 	if namespace == "*" {
+		labelSelector, nslbSpecified := os.LookupEnv(LabelSelectorEnv)
 		log.Info("Watching all namespaces")
+		if nslbSpecified {
+			log.Sugar().Infof("Watching resources with label selector: %s", labelSelector)
+			parsedSelector, err := labels.Parse(labelSelector)
+			if err != nil {
+				//setupLog.Error(err, "unable to parse label selector")
+				log.Sugar().Fatalf("unable to parse label selector: %v", err)
+			}
+			newCacheFunc = func(cfg *rest.Config, opts cache.Options) (cache.Cache, error) {
+				log.Sugar().Infof("Creating cache with label selector: %s", parsedSelector)
+				opts.SelectorsByObject = cache.SelectorsByObject{
+					&mdbv1.MongoDBCommunity{}: {
+						Label: parsedSelector,
+					},
+				}
+				return cache.New(cfg, opts)
+			}
+		}
 	} else {
 		watchNamespace = namespace
 		log.Sugar().Infof("Watching namespace: %s", watchNamespace)
@@ -82,7 +105,9 @@ func main() {
 
 	// Create a new Cmd to provide shared dependencies and start components
 	mgr, err := manager.New(cfg, manager.Options{
+		Scheme:    scheme,
 		Namespace: watchNamespace,
+		NewCache:  newCacheFunc,
 	})
 	if err != nil {
 		log.Sugar().Fatalf("Unable to create manager: %v", err)
